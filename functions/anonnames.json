@@ -79,7 +79,6 @@
         "Ambitious",
         "Considerate",
         "Courageous",
-        "Compassionate",
         "Diligent",
         "Empathetic",
         "Frank",
@@ -187,7 +186,10 @@
         "Crazy",
         "Lovely",
         "Mean",
-        "Petty"
+        "Petty",
+        "Fabulous",
+        "Baby",
+        "Klutzy"
     ],
     "animals": [
         "Ant",

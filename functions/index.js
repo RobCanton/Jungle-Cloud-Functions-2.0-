@@ -9,6 +9,9 @@ const animals = anonNames["animals"];
 const colors = anonNames["colors"];
 
 const GOOGLE_PLACES_API_KEY = "AIzaSyCTo6ejt9CDHW0BpbyhTQ8rcHfgTnDZZ2g";
+
+const WEEK_IN_MILISECONDS = 1000 * 60 * 60 * 24 * 14;
+
 admin.initializeApp(functions.config().firebase);
 const express = require('express');
 const bodyParser = require('body-parser')
@@ -72,8 +75,44 @@ app.get('/randomAnonymousName', (req, res) => {
 
 });
 
+app.post('/social/blockAnonymousUser', (req, res) => {
+    const uid = req.user.uid;
+    const body = req.body;
+    const aid = req.body.aid;
+
+    console.log("Block user: ", aid);
+
+    const getAuthorRealID = database.ref(`/anon/uid/${aid}`).once('value');
+
+    getAuthorRealID.then(snapshot => {
+        if (!snapshot.exists()) {
+            return reject();
+        }
+
+        const setBlocked = database.ref(`/social/blocked/${uid}/${snapshot.val()}`).set({
+            "t": admin.database.ServerValue.TIMESTAMP,
+            "anon": true
+        });
+        return setBlocked;
+
+
+    }).then(results => {
+        console.log("Set!");
+        return res.send({
+            "success": true,
+        });
+    }).catch(error => {
+        console.log("Something went wrong.");
+        res.status(400).send({
+            "success": false,
+        });
+    });
+
+
+});
+
 app.post('/upload', (req, res) => {
-    
+
     const uid = req.user.uid;
     const body = req.body;
     const author = req.user.uid;
@@ -86,6 +125,7 @@ app.post('/upload', (req, res) => {
     const aid = body.aid;
     const coordinates = body.coordinates;
     const placeID = body.placeID;
+    const caption = body.caption;
 
     var updateObject = {};
     const uploadRef = database.ref(`/uploads/meta/`).push();
@@ -104,6 +144,10 @@ app.post('/upload', (req, res) => {
         metaObject["placeID"] = placeID;
     }
 
+    if (caption) {
+        metaObject["caption"] = caption;
+    }
+
     if (aid) {
         const adjective = randomAdjective();
         const animal = randomAnimal();
@@ -116,6 +160,16 @@ app.post('/upload', (req, res) => {
             "animal": animal,
             "color": color
         }
+
+        const anonObject = {
+            "aid": aid,
+            "adjective": adjective,
+            "animal": animal,
+            "color": color
+        }
+
+
+        updateObject[`uploads/anonNames/${uploadKey}/${uid}`] = anonObject;
         updateObject[`users/storyAnon/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
         updateObject[`users/uploadsAnon/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
     } else {
@@ -124,6 +178,7 @@ app.post('/upload', (req, res) => {
     }
 
     updateObject[`/uploads/meta/${uploadKey}`] = metaObject;
+    updateObject[`/uploads/subscribers/${uploadKey}/${uid}`] = true;
 
     if (coordinates && coordinates.lat && coordinates.lon) {
         const locationObject = {
@@ -209,10 +264,6 @@ app.post('/upload', (req, res) => {
 
 });
 
-// This HTTPS endpoint can only be accessed by your Firebase Users.
-// Requests need to be authorized by providing an `Authorization` HTTP header
-// with value `Bearer <Firebase ID Token>`.
-exports.app = functions.https.onRequest(app);
 
 exports.handleNewUser = functions.auth.user().onCreate(event => {
     const user = event.data; // The Firebase user.
@@ -649,6 +700,66 @@ exports.processUserBlocked = functions.database.ref('/social/blocked/{uid}/{bloc
         console.log("Promise rejected: " + error);
     });
 });
+
+exports.handleBlockedUser = functions.database.ref('/social/blockedUsers/{uid}/{blocked_uid}').onWrite(event => {
+    const uid = event.params.uid;
+    const blocked_uid = event.params.blocked_uid;
+
+    // Exit when the data is deleted.
+    if (!event.data.exists()) {
+        const getAnonID = database.ref(`anon/aid/${blocked_uid}`).once('value');
+        
+        return getAnonID.then(snapshot => {
+            const aid = snapshot.val();
+            
+            const getBlockedAnonEntry = database.ref(`/social/blockedAnonymous/${uid}/${aid}`).once('value');
+            
+            return getBlockedAnonEntry.then(snapshot => {
+                if (snapshot.exists()) {
+                    return
+                }
+
+                const removeBlocked = database.ref(`/social/blocked/${uid}/${blocked_uid}`).remove();
+                return removeBlocked;
+            });
+        });
+    }
+
+    const setBlocked = database.ref(`/social/blocked/${uid}/${blocked_uid}`).set(true);
+    return setBlocked;
+
+});
+
+exports.handleBlockedAnonymousUser = functions.database.ref('/social/blockedAnonymous/{uid}/{blocked_aid}').onWrite(event => {
+    const uid = event.params.uid;
+    const blocked_aid = event.params.blocked_aid;
+
+    const getBlockedRealID = database.ref(`anon/uid/${blocked_aid}`).once('value');
+    return getBlockedRealID.then(snapshot => {
+        const blocked_uid = snapshot.val();
+
+        // Exit when the data is deleted.
+        if (!event.data.exists()) {
+            const getBlockedUserEntry = database.ref(`/social/blockedUsers/${uid}/${blocked_uid}`).once('value');
+
+            return getBlockedUserEntry.then(snapshot => {
+                if (snapshot.exists()) {
+                    return
+                }
+
+                const removeBlocked = database.ref(`/social/blocked/${uid}/${blocked_uid}`).remove();
+                return removeBlocked;
+
+            });
+
+        }
+
+        const setBlocked = database.ref(`/social/blocked/${uid}/${blocked_uid}`).set(true);
+        return setBlocked;
+
+    });
+});
+
 
 /*  Process Uploads
     - If new post, add to follower feeds
@@ -1193,14 +1304,6 @@ exports.updateReportsMeta = functions.database.ref('/reports/posts/{postKey}').o
 
 });
 
-
-
-
-
-
-
-
-
 exports.locationUpdate = functions.database.ref('/users/location/coordinates/{uid}').onWrite(event => {
     const userId = event.params.uid;
     const value = event.data.val();
@@ -1264,7 +1367,6 @@ exports.locationUpdate = functions.database.ref('/users/location/coordinates/{ui
         console.log("Promise rejected: " + error);
     });
 });
-
 
 exports.conversationMetaUpdate = functions.database.ref('/conversations/{conversationKey}/meta').onWrite(event => {
     const conversationKey = event.params.conversationKey;
@@ -1415,7 +1517,6 @@ exports.sendMessageNotification = functions.database.ref('/conversations/{conver
 
 });
 
-
 exports.updateUserUploadCount = functions.database.ref('/users/uploads/{uid}/{postKey}').onWrite(event => {
     const uid = event.params.uid;
     const value = event.data.value;
@@ -1426,7 +1527,6 @@ exports.updateUserUploadCount = functions.database.ref('/users/uploads/{uid}/{po
     });
 });
 
-const WEEK_IN_MILISECONDS = 1000 * 60 * 60 * 24 * 14;
 
 exports.updatePostMeta = functions.database.ref('/uploads/stats/{postKey}').onWrite(event => {
     const postKey = event.params.postKey;
@@ -1579,7 +1679,6 @@ exports.handleSearchRequest = functions.database.ref('/api/requests/user_search/
     });
 })
 
-
 exports.addAnonynmousNamesToLookup = functions.database.ref('/admin/add_anon_names').onWrite(event => {
     // Only edit data when it is first created.
     if (event.data.previous.exists()) {
@@ -1608,6 +1707,11 @@ exports.addAnonynmousNamesToLookup = functions.database.ref('/admin/add_anon_nam
     });
 
 });
+
+// This HTTPS endpoint can only be accessed by your Firebase Users.
+// Requests need to be authorized by providing an `Authorization` HTTP header
+// with value `Bearer <Firebase ID Token>`.
+exports.app = functions.https.onRequest(app);
 
 
 Array.prototype.containsAtIndex = function (v) {
