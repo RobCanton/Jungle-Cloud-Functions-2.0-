@@ -111,16 +111,45 @@ app.post('/social/blockAnonymousUser', (req, res) => {
 
 });
 
+app.get('/uploadKey', (req, res) => {
+    const uid = req.user.uid;
+
+    console.log("Request new uploadKey.");
+
+    const uploadRef = database.ref(`uploads/meta/`).push();
+    const uploadKey = uploadRef.key;
+
+    const object = {
+        "state": "UPLOAD_PENDING"
+    };
+
+    uploadRef.set(object).then(error => {
+        if (error) {
+            return res.status(400).send({
+                "success": false,
+            });
+        }
+        
+        res.send({
+            "success": true,
+            "uploadKey": uploadKey
+        });
+    });
+
+});
+
 app.post('/upload', (req, res) => {
 
     const uid = req.user.uid;
     const body = req.body;
+    const uploadKey = body.key;
     const author = req.user.uid;
     const anon = body.anon;
     const color = body.color;
     const type = body.contentType;
     const length = body.length;
     const url = body.url;
+    const videoURL = body.videoURL;
 
     const aid = body.aid;
     const coordinates = body.coordinates;
@@ -128,15 +157,17 @@ app.post('/upload', (req, res) => {
     const caption = body.caption;
 
     var updateObject = {};
-    const uploadRef = database.ref(`/uploads/meta/`).push();
-    const uploadKey = uploadRef.key;
+
 
     var metaObject = {
+        "state": "UPLOADED",
         "author": author,
         "color": color,
         "contentType": type,
         "length": length,
-        "timestamp": admin.database.ServerValue.TIMESTAMP,
+        "stats": {
+            "timestamp": admin.database.ServerValue.TIMESTAMP,
+        },
         "url": url
     };
 
@@ -146,6 +177,10 @@ app.post('/upload', (req, res) => {
 
     if (caption) {
         metaObject["caption"] = caption;
+    }
+
+    if (videoURL) {
+        metaObject["videoURL"] = videoURL;
     }
 
     if (aid) {
@@ -171,10 +206,10 @@ app.post('/upload', (req, res) => {
 
         updateObject[`uploads/anonNames/${uploadKey}/${uid}`] = anonObject;
         updateObject[`users/storyAnon/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-        updateObject[`users/uploadsAnon/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+        updateObject[`users/uploads/anon/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
     } else {
         updateObject[`users/story/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-        updateObject[`users/uploads/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+        updateObject[`users/uploads/public/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
     }
 
     updateObject[`/uploads/meta/${uploadKey}`] = metaObject;
@@ -708,12 +743,12 @@ exports.handleBlockedUser = functions.database.ref('/social/blockedUsers/{uid}/{
     // Exit when the data is deleted.
     if (!event.data.exists()) {
         const getAnonID = database.ref(`anon/aid/${blocked_uid}`).once('value');
-        
+
         return getAnonID.then(snapshot => {
             const aid = snapshot.val();
-            
+
             const getBlockedAnonEntry = database.ref(`/social/blockedAnonymous/${uid}/${aid}`).once('value');
-            
+
             return getBlockedAnonEntry.then(snapshot => {
                 if (snapshot.exists()) {
                     return
@@ -815,7 +850,8 @@ function deletePost(key, author, placeId) {
 
     var promises = [
         database.ref(`uploads/notifications/${key}`).once('value'),
-        database.ref(`users/uploads/${author}/${key}`).remove(),
+        database.ref(`users/uploads/public/${author}/${key}`).remove(),
+        database.ref(`users/uploads/anon/${author}/${key}`).remove(),
         database.ref(`uploads/comments/${key}`).remove(),
         database.ref(`users/story/${author}/posts/${key}`).remove(),
         database.ref(`uploads/location/${key}`).remove(),
@@ -998,9 +1034,9 @@ exports.sendCommentNotification = functions.database.ref('/uploads/comments/{pos
             }
 
             if (numComments > 0) {
-                return database.ref(`/uploads/meta/${postKey}/comments`).set(numComments);
+                return database.ref(`/uploads/meta/${postKey}/stats/comments`).set(numComments);
             } else {
-                return database.ref(`/uploads/meta/${postKey}/comments`).remove();
+                return database.ref(`/uploads/meta/${postKey}/stats/comments`).remove();
             }
 
         }).catch(function (error) {
@@ -1086,8 +1122,9 @@ exports.sendCommentNotification = functions.database.ref('/uploads/comments/{pos
         }
 
         var metaUpdateObject = {};
-        metaUpdateObject[`/uploads/meta/${postKey}/comments`] = numComments;
-        metaUpdateObject[`/uploads/meta/${postKey}/commenters`] = commenters.length;
+        metaUpdateObject[`/uploads/meta/${postKey}/stats/comments`] = numComments;
+        metaUpdateObject[`/uploads/meta/${postKey}/stats/commenters`] = commenters.length;
+
 
         const metaUpdatePromise = database.ref().update(metaUpdateObject);
 
@@ -1196,7 +1233,7 @@ exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}
         var promises = [];
 
         if (numLikes > 0) {
-            const promise = database.ref(`/uploads/meta/${postKey}/likes`).set(numLikes);
+            const promise = database.ref(`/uploads/meta/${postKey}/stats/likes`).set(numLikes);
             promises.push(promise);
             var notificationObject = {};
             const nKey = `like:${postKey}`;
@@ -1213,7 +1250,7 @@ exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}
             promises.push(notificationPromise);
 
         } else {
-            const promise = database.ref(`/uploads/meta/${postKey}/likes`).remove();
+            const promise = database.ref(`/uploads/meta/${postKey}/stats/likes`).remove();
             promises.push(promise);
 
             const nKey = `like:${postKey}`;
@@ -1260,10 +1297,10 @@ exports.updateViewsMeta = functions.database.ref('/uploads/views/{postKey}/{uid}
         var promises = [];
 
         if (numViews > 0) {
-            const promise = database.ref(`/uploads/meta/${postKey}/views`).set(numViews);
+            const promise = database.ref(`/uploads/meta/${postKey}/stats/views`).set(numViews);
             promises.push(promise);
         } else {
-            const promise = database.ref(`/uploads/meta/${postKey}/views`).remove();
+            const promise = database.ref(`/uploads/meta/${postKey}/stats/views`).remove();
             promises.push(promise);
         }
 
@@ -1289,10 +1326,10 @@ exports.updateReportsMeta = functions.database.ref('/reports/posts/{postKey}').o
     const numReports = event.data.numChildren()
     var promises = [];
     if (numReports > 0) {
-        const promise = database.ref(`/uploads/meta/${postKey}/reports`).set(numReports);
+        const promise = database.ref(`/uploads/meta/${postKey}/stats/reports`).set(numReports);
         promises.push(promise);
     } else {
-        const promise = database.ref(`/uploads/meta/${postKey}/reports`).remove();
+        const promise = database.ref(`/uploads/meta/${postKey}/stats/reports`).remove();
         promises.push(promise);
     }
 
@@ -1517,18 +1554,15 @@ exports.sendMessageNotification = functions.database.ref('/conversations/{conver
 
 });
 
-exports.updateUserUploadCount = functions.database.ref('/users/uploads/{uid}/{postKey}').onWrite(event => {
+exports.updateUserUploadPublicCount = functions.database.ref('/users/uploads/public/{uid}').onWrite(event => {
     const uid = event.params.uid;
-    const value = event.data.value;
-
-    return database.ref(`users/uploads/${uid}`).once('value').then(snapshot => {
-
-        return database.ref(`users/profile/${uid}/posts`).set(snapshot.numChildren());
-    });
+    const value = event.data;
+    return database.ref(`users/profile/${uid}/posts`).set(value.numChildren());
 });
 
 
-exports.updatePostMeta = functions.database.ref('/uploads/stats/{postKey}').onWrite(event => {
+
+exports.updatePostMeta = functions.database.ref('/uploads/meta/{postKey}/stats').onWrite(event => {
     const postKey = event.params.postKey;
 
     const value = event.data.val();
@@ -1536,50 +1570,39 @@ exports.updatePostMeta = functions.database.ref('/uploads/stats/{postKey}').onWr
     if (value == null || value == undefined) {
         return
     }
-    const t = value.t;
+    const t = value.timestamp;
 
     if (t == undefined || t == null) {
         return
     }
-    const comments = value.c;
+    const comments = value.comments;
 
     const now = Date.now();
     const timeSinceNow = (now - t) / WEEK_IN_MILISECONDS;
 
     const timeRatio = 1 - timeSinceNow;
 
-    //    console.log("TimeNow: ", now);
-    //    console.log("TimeSinceNow: ", timeSinceNow);
-    //    console.log("TimeRatio: ", timeRatio);
-
     var views = 0;
-    if (value.v != null && value.v != undefined) {
-        views = value.v;
+    if (value.views != null && value.views != undefined) {
+        views = value.views;
     }
 
     var likes = 0;
-    if (value.l != null && value.l != undefined) {
-        likes = value.l;
+    if (value.likes != null && value.likes != undefined) {
+        likes = value.likes;
     }
 
     var participants = 0;
-    if (value.p != null && value.p != undefined) {
-        participants = Object.keys(value.p).length;
+    if (value.commenters != null && value.commenters != undefined) {
+        participants = value.commenters;
     }
 
-    //    console.log("p: ", participants);
-    //    console.log("l: ", likes);
-    //    console.log("v: ", views);
-    //    console.log("t: ", timeRatio);
 
     const pop = ((participants * 3.0 + likes * 2.0)) * timeRatio;
 
-
-    //    console.log("POPULARITY: ", pop);
-
     var promises = [];
 
-    if (pop > 2) {
+    if (pop > 0) {
         const setPopularity = database.ref(`/uploads/popular/${postKey}`).set(pop);
         promises.push(setPopularity);
     } else {
