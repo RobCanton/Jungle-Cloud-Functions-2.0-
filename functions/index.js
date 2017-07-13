@@ -120,7 +120,8 @@ app.get('/uploadKey', (req, res) => {
     const uploadKey = uploadRef.key;
 
     const object = {
-        "state": "UPLOAD_PENDING"
+        "UPLOAD_PENDING": true,
+        "author": uid
     };
 
     uploadRef.set(object).then(error => {
@@ -129,7 +130,7 @@ app.get('/uploadKey', (req, res) => {
                 "success": false,
             });
         }
-        
+
         res.send({
             "success": true,
             "uploadKey": uploadKey
@@ -156,116 +157,145 @@ app.post('/upload', (req, res) => {
     const placeID = body.placeID;
     const caption = body.caption;
 
-    var updateObject = {};
-
-
-    var metaObject = {
-        "state": "UPLOADED",
-        "author": author,
-        "color": color,
-        "contentType": type,
-        "length": length,
-        "stats": {
-            "timestamp": admin.database.ServerValue.TIMESTAMP,
-        },
-        "url": url
-    };
-
-    if (placeID) {
-        metaObject["placeID"] = placeID;
-    }
-
-    if (caption) {
-        metaObject["caption"] = caption;
-    }
-
-    if (videoURL) {
-        metaObject["videoURL"] = videoURL;
-    }
-
-    if (aid) {
-        const adjective = randomAdjective();
-        const animal = randomAnimal();
-        const color = randomColor();
-
-        metaObject["author"] = aid;
-        metaObject["anon"] = {
-
-            "adjective": adjective,
-            "animal": animal,
-            "color": color
+    const verifyUploadKey = database.ref(`uploads/meta/${uploadKey}`).once('value');
+    verifyUploadKey.then(snapshot => {
+        const author = snapshot.val().author;
+        if (author !== uid) {
+            return res.status(400).send({
+                "success": false
+            });
         }
 
-        const anonObject = {
-            "aid": aid,
-            "adjective": adjective,
-            "animal": animal,
-            "color": color
+        var updateObject = {};
+
+        var metaObject = {
+            "author": author,
+            "color": color,
+            "contentType": type,
+            "length": length,
+            "stats": {
+                "timestamp": admin.database.ServerValue.TIMESTAMP,
+                "views": 0,
+                "likes": 0,
+                "comments": 0,
+                "commenters": 0,
+                "reports": 0
+                
+            },
+            "url": url
+        };
+
+        if (placeID) {
+            metaObject["placeID"] = placeID;
         }
 
-
-        updateObject[`uploads/anonNames/${uploadKey}/${uid}`] = anonObject;
-        updateObject[`users/storyAnon/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-        updateObject[`users/uploads/anon/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-    } else {
-        updateObject[`users/story/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-        updateObject[`users/uploads/public/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-    }
-
-    updateObject[`/uploads/meta/${uploadKey}`] = metaObject;
-    updateObject[`/uploads/subscribers/${uploadKey}/${uid}`] = true;
-
-    if (coordinates && coordinates.lat && coordinates.lon) {
-        const locationObject = {
-            "u": author,
-            "lat": coordinates.lat,
-            "lon": coordinates.lon,
-            "t": admin.database.ServerValue.TIMESTAMP
+        if (caption) {
+            metaObject["caption"] = caption;
         }
 
-        updateObject[`/uploads/location/${uploadKey}`] = locationObject;
-    }
+        if (videoURL) {
+            metaObject["videoURL"] = videoURL;
+        }
 
-    if (placeID) {
-        const url = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
-        request(url, function (error, response, body) {
+        if (aid) {
+            const adjective = randomAdjective();
+            const animal = randomAnimal();
+            const color = randomColor();
 
-            if (error) {
-                return res.status(400).send({
-                    "success": false
-                });
-            } else {
+            metaObject["author"] = aid;
+            metaObject["anon"] = {
 
-                var jsonResults = JSON.parse(body)["result"];
-                const name = jsonResults["name"];
-                const addr = jsonResults["formatted_address"];
-                const lat = jsonResults["geometry"]["location"]["lat"];
-                const lon = jsonResults["geometry"]["location"]["lng"];
-
-                const placeInfo = {
-                    "name": name,
-                    "address": addr,
-                    "lat": lat,
-                    "lon": lon
-                };
-
-                const placeCoords = {
-                    "lat": lat,
-                    "lon": lon
-                };
-
-                const placeStory = {
-                    "t": admin.database.ServerValue.TIMESTAMP,
-                    "u": author
-                }
-
-                updateObject[`places/info/${placeID}`] = placeInfo;
-                updateObject[`places/coords/${placeID}`] = placeCoords;
-                updateObject[`places/posts/${placeID}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-                updateObject[`places/story/${placeID}/${uploadKey}`] = placeStory;
-
+                "adjective": adjective,
+                "animal": animal,
+                "color": color
             }
 
+            const anonObject = {
+                "aid": aid,
+                "adjective": adjective,
+                "animal": animal,
+                "color": color
+            }
+
+
+            updateObject[`uploads/anonNames/${uploadKey}/${uid}`] = anonObject;
+            updateObject[`users/storyAnon/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+            updateObject[`users/uploads/anon/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+        } else {
+            updateObject[`users/story/${uid}/posts/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+            updateObject[`users/uploads/public/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+        }
+
+        updateObject[`/uploads/meta/${uploadKey}`] = metaObject;
+        updateObject[`/uploads/subscribers/${uploadKey}/${uid}`] = true;
+
+        if (coordinates && coordinates.lat && coordinates.lon) {
+            const locationObject = {
+                "u": author,
+                "lat": coordinates.lat,
+                "lon": coordinates.lon,
+                "t": admin.database.ServerValue.TIMESTAMP
+            }
+
+            updateObject[`/uploads/location/${uploadKey}`] = locationObject;
+        }
+
+        if (placeID) {
+            const url = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
+            request(url, function (error, response, body) {
+
+                if (error) {
+                    return res.status(400).send({
+                        "success": false
+                    });
+                } else {
+
+                    var jsonResults = JSON.parse(body)["result"];
+                    const name = jsonResults["name"];
+                    const addr = jsonResults["formatted_address"];
+                    const lat = jsonResults["geometry"]["location"]["lat"];
+                    const lon = jsonResults["geometry"]["location"]["lng"];
+
+                    const placeInfo = {
+                        "name": name,
+                        "address": addr,
+                        "lat": lat,
+                        "lon": lon
+                    };
+
+                    const placeCoords = {
+                        "lat": lat,
+                        "lon": lon
+                    };
+
+                    const placeStory = {
+                        "t": admin.database.ServerValue.TIMESTAMP,
+                        "u": author
+                    }
+
+                    updateObject[`places/info/${placeID}`] = placeInfo;
+                    updateObject[`places/coords/${placeID}`] = placeCoords;
+                    updateObject[`places/posts/${placeID}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+                    updateObject[`places/story/${placeID}/${uploadKey}`] = placeStory;
+
+                }
+
+                const update = database.ref().update(updateObject);
+
+                update.then(error => {
+                    if (error) {
+                        return res.status(400).send({
+                            "success": false
+                        });
+                    } else {
+                        res.send({
+                            "success": true,
+                        });
+                    }
+                });
+            });
+
+        } else {
             const update = database.ref().update(updateObject);
 
             update.then(error => {
@@ -279,23 +309,9 @@ app.post('/upload', (req, res) => {
                     });
                 }
             });
-        });
+        }
 
-    } else {
-        const update = database.ref().update(updateObject);
-
-        update.then(error => {
-            if (error) {
-                return res.status(400).send({
-                    "success": false
-                });
-            } else {
-                res.send({
-                    "success": true,
-                });
-            }
-        });
-    }
+    });
 
 });
 
