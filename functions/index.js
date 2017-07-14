@@ -180,7 +180,7 @@ app.post('/upload', (req, res) => {
                 "comments": 0,
                 "commenters": 0,
                 "reports": 0
-                
+
             },
             "url": url
         };
@@ -1676,6 +1676,7 @@ exports.sendNewBadgeNotification = functions.database.ref('/users/badges/{uid}/{
     return database.ref(`/notifications/badge:${uid}:${badgeID}`).set(object);
 
 });
+
 
 exports.handleSearchRequest = functions.database.ref('/api/requests/user_search/{uid}').onWrite(event => {
     const uid = event.params.uid;
