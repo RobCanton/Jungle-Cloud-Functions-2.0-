@@ -111,6 +111,103 @@ app.post('/social/blockAnonymousUser', (req, res) => {
 
 });
 
+app.post('/editcaption/:postKey', (req, res) => {
+    const uid = req.user.uid;
+    const postKey = req.params.postKey;
+    const caption = req.body.caption;
+
+    const getAid = database.ref(`anon/aid/${uid}`).once('value');
+    const getAuthor = database.ref(`uploads/meta/${postKey}/author`).once('value');
+
+    Promise.all([getAid, getAuthor]).then(results => {
+        const aid = results[0].val();
+        const author = results[1].val();
+
+        if (author !== uid && author !== aid) {
+            return res.status(400).send({
+                "success": false,
+            });
+        }
+
+        const setCaption = database.ref(`uploads/meta/${postKey}/caption`).set(caption);
+        setCaption.then(results => {
+            return res.send({
+                "success": true,
+            });
+        }).catch(error => {
+            return res.status(400).send({
+                "success": false,
+            });
+        })
+    });
+});
+
+app.delete('/comment/:postKey/:commentKey', (req, res) => {
+    const uid = req.user.uid;
+    const postKey = req.params.postKey;
+    const commentKey = req.params.commentKey;
+
+    const getAid = database.ref(`anon/aid/${uid}`).once('value');
+    const getAuthor = database.ref(`uploads/comments/${postKey}/${commentKey}/author`).once('value');
+
+    Promise.all([getAid, getAuthor]).then(results => {
+        const aid = results[0].val();
+        const author = results[1].val();
+
+        if (author !== uid && author !== aid) {
+            return res.status(400).send({
+                "success": false,
+            });
+        }
+
+        const removeComment = database.ref(`uploads/comments/${postKey}/${commentKey}`).remove();
+        removeComment.then(results => {
+            return res.send({
+                "success": true,
+            });
+        }).catch(error => {
+            return res.status(400).send({
+                "success": false,
+            });
+        });
+
+    });
+});
+
+app.delete('/upload/:postKey', (req, res) => {
+    const uid = req.user.uid;
+    const postKey = req.params.postKey;
+
+    const getAid = database.ref(`anon/aid/${uid}`).once('value');
+    const getAuthor = database.ref(`uploads/meta/${postKey}/author`).once('value');
+
+    Promise.all([getAid, getAuthor]).then(results => {
+        const aid = results[0].val();
+        const author = results[1].val();
+
+        if (author !== uid && author !== aid) {
+            return res.status(400).send({
+                "success": false,
+            });
+        }
+
+        const deletePost = database.ref(`uploads/meta/${postKey}`).remove();
+        const deletePostQueue = database.ref(`admin/postsToRemove/${postKey}`).set(true);
+
+        Promise.all([deletePost, deletePostQueue]).then(results => {
+            return res.send({
+                "success": true,
+            });
+        }).catch(error => {
+            return res.status(400).send({
+                "success": false,
+            });
+        })
+
+
+    });
+});
+
 app.get('/uploadKey', (req, res) => {
     const uid = req.user.uid;
 
@@ -138,6 +235,7 @@ app.get('/uploadKey', (req, res) => {
     });
 
 });
+
 
 app.post('/upload', (req, res) => {
 
@@ -251,6 +349,7 @@ app.post('/upload', (req, res) => {
                 } else {
 
                     var jsonResults = JSON.parse(body)["result"];
+                    console.log("PLACE RESULTS: ", JSON.stringify(jsonResults, null, 2));
                     const name = jsonResults["name"];
                     const addr = jsonResults["formatted_address"];
                     const lat = jsonResults["geometry"]["location"]["lat"];
@@ -325,7 +424,17 @@ exports.handleNewUser = functions.auth.user().onCreate(event => {
     const userRef = database.ref(`anon/uid/${anonKey}`).set(uid);
     const anonRef = database.ref(`anon/aid/${uid}`).set(anonKey);
 
-    return Promise.all([userRef, anonRef]).then(results => {
+    var pushNotificationPayload = {
+        "notification": {
+            "body": `A new user has joined Jungle!`
+        }
+    };
+
+    console.log("Send payload: ", pushNotificationPayload);
+    const TOKEN = "fwpJ35NXKVE:APA91bHxT4Bx0Y4-APPUJGOgbLuaIw0qTvBb0anmUYcPndF3gd6cPgAQ9TkLUyB7gHP3JIpHJQArc7mGzAxyApJGJt9MvxO5QkgrU7D1UI1iB7IoVJI4CSOW6lIUZ_bWZetOyi80wKrD";
+    const sendPushNotification = admin.messaging().sendToDevice(TOKEN, pushNotificationPayload);
+
+    return Promise.all([userRef, anonRef, sendPushNotification]).then(results => {
         console.log("User Anon ID generated successfully.");
     });
 });
@@ -351,10 +460,12 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
 
     // Only edit data when it is first created.
     if (event.data.previous.exists()) {
+        console.log("Previous data exists: Exit");
         return;
     }
     // Exit when the data is deleted.
     if (!event.data.exists()) {
+        console.log("Data removed: Exit");
         return;
     }
 
@@ -363,11 +474,12 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
     const timestamp = event.data.val().timestamp;
 
     console.log("Anon comment recieved.");
+    console.log("Text: ", text);
 
     const getExisitingAnonName = database.ref(`/uploads/anonNames/${postKey}/${uid}`).once('value');
 
     return getExisitingAnonName.then(existingAnonName => {
-
+        
 
         if (existingAnonName.exists()) {
             const adjective = existingAnonName.val().adjective;
@@ -387,8 +499,13 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
             };
             const commentKey = database.ref(`/uploads/comments/${postKey}/`).push().key;
             const setComment = database.ref(`/uploads/comments/${postKey}/${commentKey}`).set(commentObject);
-            return setComment.then(results => {});
+            return setComment.then(results => {})
+            .catch(error => {
+                console.log("AnonComment: ", error);
+            });
         }
+        
+        console.log("Anon name does not exist");
 
         const getPostAnonNames = database.ref(`/uploads/anonNames/${postKey}`).once('value');
         return getPostAnonNames.then(snapshot => {
@@ -441,6 +558,8 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
 
             return Promise.all([setAnonName, setComment]).then(results => {
 
+            }).catch(error => {
+                console.log("AnonComment: ", error);
             });
 
         });
@@ -527,70 +646,21 @@ exports.runCleanUp = functions.database.ref('/admin/cleanup').onWrite(event => {
 
     database.ref('/admin/cleanup').remove();
 
-    /*
-    const getLivePosts = database.ref(`uploads/live`).once('value');
-
-    return getLivePosts.then(snapshot => {
-
-        var promises = [];
-
-        snapshot.forEach(function (post) {
-            const key = post.key;
-            const postVal = post.val();
-            const timestamp = postVal.timestamp;
-            const author = postVal.author;
-            const place = postVal.place;
-
-            const age = utilities.getMinutesSinceNow(timestamp);
-
-            if (age >= 1440) {
-                const promise = database.ref(`uploads/live/${key}`).remove();
-                promises.push(promise);
-
-                const promise2 = database.ref(`uploads/location/${key}`).remove();
-                promises.push(promise2);
-
-                const promise3 = database.ref(`uploads/popular/${key}`).remove();
-                promises.push(promise3);
-
-                if (author != null) {
-                    const promise4 = database.ref(`users/story/${author}/${key}`).remove();
-                    promises.push(promise4);
-                }
-
-                if (place != null) {
-                    const promise5 = database.ref(`places/story/${place}/${key}`).remove();
-                    promises.push(promise5);
-                }
-
-            }
-        });
-
-        return Promise.all(promises).then(results => {
-
-        }).catch(error => {
-            console.log("Promise rejected: " + error);
-        });
-    }) 
-    */
-
-
     const getMostPopular = database.ref(`uploads/popular`).once('value');
     const getLocationPosts = database.ref(`uploads/location`).once('value');
     const getUserStories = database.ref(`users/story`).once('value');
+    const getPlaceStories = database.ref(`places/story`).once('value');
 
-
-
-
-    return Promise.all([getMostPopular, getLocationPosts, getUserStories]).then(results => {
+    return Promise.all([getMostPopular, getLocationPosts, getUserStories, getPlaceStories]).then(results => {
         const popularSnapshot = results[0];
         const locationsSnapshot = results[1];
         const storiesSnapshot = results[2];
+        const placeStoriesSnapshot = results[3];
 
         var promises = [];
 
         popularSnapshot.forEach(function (_post) {
-            const postRef = database.ref(`uploads/stats/${_post.key}`);
+            const postRef = database.ref(`uploads/meta/${_post.key}/stats`);
             const promise = postRef.transaction(function (post) {
                 if (post) {
                     if (post.n !== null && post.n !== undefined) {
@@ -626,6 +696,22 @@ exports.runCleanUp = functions.database.ref('/admin/cleanup').onWrite(event => {
 
                 if (age >= 1440) {
                     const promise = database.ref(`users/story/${uid}/posts/${key}`).remove();
+                    promises.push(promise);
+                }
+            });
+
+        });
+        
+        placeStoriesSnapshot.forEach(function (placeStorySnapshot) {
+            const placeID = placeStorySnapshot.key;
+            const story = placeStorySnapshot.val();
+            
+            placeStorySnapshot.forEach(function(story) {
+                const timestamp = story.val().t;
+                const age = utilities.getMinutesSinceNow(timestamp);
+
+                if (age >= 1440) {
+                    const promise = database.ref(`places/story/${placeID}/${story.key}`).remove();
                     promises.push(promise);
                 }
             });
@@ -824,7 +910,7 @@ exports.processUploads =
         const newData = event.data._newData;
         const prevData = event.data.previous._data;
 
-        if (value == null || value == undefined) {
+        if (!event.data.exists()) {
             return deletePost(uploadKey, prevData.author, prevData.placeID);
         }
 
@@ -870,13 +956,16 @@ function deletePost(key, author, placeId) {
         database.ref(`users/uploads/anon/${author}/${key}`).remove(),
         database.ref(`uploads/comments/${key}`).remove(),
         database.ref(`users/story/${author}/posts/${key}`).remove(),
+        database.ref(`users/storyAnon/${author}/posts/${key}`).remove(),
         database.ref(`uploads/location/${key}`).remove(),
         database.ref(`uploads/live/${key}`).remove(),
         database.ref(`uploads/likes/${key}`).remove(),
         database.ref(`uploads/popular/${key}`).remove(),
         database.ref(`uploads/stats/${key}`).remove(),
         database.ref(`uploads/subscribers/${key}`).remove(),
-        database.ref(`reports/posts/${key}`).remove()
+        database.ref(`uploads/anonNames/${key}`).remove(),
+        database.ref(`reports/posts/${key}`).remove(),
+        
     ];
 
     if (placeId !== null && placeId !== undefined) {
@@ -1062,7 +1151,6 @@ exports.sendCommentNotification = functions.database.ref('/uploads/comments/{pos
 
     const sender = newData.author;
     const anonData = newData.anon;
-    console.log("ANON DATA: ", anonData);
     const postAuthorPromise = database.ref(`uploads/meta/${postKey}`).once('value');
     const postCommentsPromise = database.ref(`/uploads/comments/${postKey}`).once('value');
     const postSubscribersPromise = database.ref(`/uploads/subscribers/${postKey}`).once('value');
@@ -1249,8 +1337,6 @@ exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}
         var promises = [];
 
         if (numLikes > 0) {
-            const promise = database.ref(`/uploads/meta/${postKey}/stats/likes`).set(numLikes);
-            promises.push(promise);
             var notificationObject = {};
             const nKey = `like:${postKey}`;
             const nObject = {
@@ -1266,15 +1352,13 @@ exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}
             promises.push(notificationPromise);
 
         } else {
-            const promise = database.ref(`/uploads/meta/${postKey}/stats/likes`).remove();
-            promises.push(promise);
 
             const nKey = `like:${postKey}`;
             const removeNotification = database.ref(`notifications/${nKey}`).remove();
             promises.push(removeNotification);
         }
 
-        const promise = database.ref(`/uploads/stats/${postKey}/l`).set(numLikes);
+        const promise = database.ref(`/uploads/meta/${postKey}/stats/likes`).set(numLikes);
         promises.push(promise);
 
 
@@ -1288,48 +1372,15 @@ exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}
     });
 });
 
-exports.updateViewsMeta = functions.database.ref('/uploads/views/{postKey}/{uid}').onWrite(event => {
+exports.updateViewsMeta = functions.database.ref('/uploads/views/{postKey}').onWrite(event => {
     const userId = event.params.uid;
     const postKey = event.params.postKey;
-    const value = event.data.val();
-    const newData = event.data._newData;
-    var toRemove = false;
-    if (value == null) {
-        toRemove = true;
-    }
+    const numViews = event.data.numChildren();
 
-    const postDataPromise = database.ref(`/uploads/meta/${postKey}`).once('value');
-    const postViewsPromise = database.ref(`/uploads/views/${postKey}`).once('value');
+    const setViews = database.ref(`/uploads/meta/${postKey}/stats/views`).set(numViews);
 
-    return Promise.all([postDataPromise, postViewsPromise]).then(results => {
-        const postMeta = results[0].val();
-        const postViews = results[1];
-        const author = postMeta.author;
-        const live = postMeta.live;
-        const placeId = postMeta.placeID;
+    return setViews.then(result => {
 
-        const numViews = postViews.numChildren();
-
-        var promises = [];
-
-        if (numViews > 0) {
-            const promise = database.ref(`/uploads/meta/${postKey}/stats/views`).set(numViews);
-            promises.push(promise);
-        } else {
-            const promise = database.ref(`/uploads/meta/${postKey}/stats/views`).remove();
-            promises.push(promise);
-        }
-
-        if (live && postViews.val() !== null && postViews.val() !== undefined) {
-            const promise = database.ref(`/uploads/stats/${postKey}/v`).set(numViews);
-            promises.push(promise);
-        }
-
-        return Promise.all(promises).then(result => {
-
-        }).catch(function (error) {
-            console.log("Promise rejected: " + error);
-        });
     }).catch(function (error) {
         console.log("Promise rejected: " + error);
     });
@@ -1340,16 +1391,8 @@ exports.updateReportsMeta = functions.database.ref('/reports/posts/{postKey}').o
     const postKey = event.params.postKey;
 
     const numReports = event.data.numChildren()
-    var promises = [];
-    if (numReports > 0) {
-        const promise = database.ref(`/uploads/meta/${postKey}/stats/reports`).set(numReports);
-        promises.push(promise);
-    } else {
-        const promise = database.ref(`/uploads/meta/${postKey}/stats/reports`).remove();
-        promises.push(promise);
-    }
-
-    return Promise.all(promises).then(result => {
+    const promise = database.ref(`/uploads/meta/${postKey}/stats/reports`).set(numReports);
+    return promise.then(result => {
 
     }).catch(function (error) {
         console.log("Promise rejected: " + error);
@@ -1638,10 +1681,10 @@ exports.updateUsername = functions.database.ref('/users/profile/{uid}/username')
     const uid = event.params.uid;
     const value = event.data.val();
 
-
     if (value != null && value != undefined) {
         const addUsernameLookupEntry = database.ref(`/users/lookup/username/${uid}`).set(value);
-        return addUsernameLookupEntry.then(snapshot => {
+        const addRealUsernameLookupEntry = database.ref(`/users/lookup/searchableUsernames/${uid}`).set(value);
+        return Promise.all([addUsernameLookupEntry, addRealUsernameLookupEntry]).then(snapshot => {
 
         });
 
@@ -1684,7 +1727,7 @@ exports.handleSearchRequest = functions.database.ref('/api/requests/user_search/
 
     const usersIds = {};
 
-    const getUsersnames = database.ref(`/users/lookup/username`).once("value");
+    const getUsersnames = database.ref(`/users/lookup/searchableUsernames`).once("value");
 
     return getUsersnames.then(snapshot => {
 
