@@ -4,11 +4,26 @@ const request = require('request');
 const utilities = require('./utilities.js');
 const countryCodes = require('./countryCodes.json');
 const anonNames = require('./anonnames.json');
+const NodeGeocoder = require('node-geocoder');
 const adjectives = anonNames["adjectives"];
 const animals = anonNames["animals"];
 const colors = anonNames["colors"];
+const rp = require('request-promise');
 
 const GOOGLE_PLACES_API_KEY = "AIzaSyCTo6ejt9CDHW0BpbyhTQ8rcHfgTnDZZ2g";
+
+
+var options = {
+    provider: 'google',
+
+    // Optional depending on the providers
+    httpAdapter: 'https', // Default
+    apiKey: GOOGLE_PLACES_API_KEY, // for Mapquest, OpenCage, Google Premier
+    formatter: null // 'gpx', 'string', ...
+};
+
+var geocoder = NodeGeocoder(options);
+
 
 const WEEK_IN_MILISECONDS = 1000 * 60 * 60 * 24 * 14;
 
@@ -73,6 +88,29 @@ app.get('/randomAnonymousName', (req, res) => {
         "color": color
     });
 
+});
+
+app.post('/cityKey', (req, res) => {
+    const city = req.body.city;
+    const country = req.body.country;
+    const region = req.body.region;
+    const code = `${country}:${region}:${city}`;
+    const cityRef = database.ref('cities/info').orderByChild('code').equalTo(code).limitToFirst(1).once('value');
+    cityRef.then(snapshot => {
+        if (!snapshot.exists()) {
+            res.status(400).send({
+                "success": false
+            });
+        }
+
+        const cityKey = Object.keys(snapshot.val())[0];
+        res.send({
+            "success": true,
+            "cityKey": cityKey,
+            "lat": snapshot.val()[cityKey].lat,
+            "lon": snapshot.val()[cityKey].lon
+        });
+    });
 });
 
 app.post('/social/blockAnonymousUser', (req, res) => {
@@ -243,7 +281,6 @@ app.post('/upload', (req, res) => {
     const body = req.body;
     const uploadKey = body.key;
     const author = req.user.uid;
-    const anon = body.anon;
     const color = body.color;
     const type = body.contentType;
     const length = body.length;
@@ -252,8 +289,28 @@ app.post('/upload', (req, res) => {
 
     const aid = body.aid;
     const coordinates = body.coordinates;
+    const lat = coordinates.lat;
+    const lon = coordinates.lon;
     const placeID = body.placeID;
     const caption = body.caption;
+
+    var updateObject = {};
+
+    var metaObject = {
+        "color": color,
+        "contentType": type,
+        "length": length,
+        "stats": {
+            "timestamp": admin.database.ServerValue.TIMESTAMP,
+            "views": 0,
+            "likes": 0,
+            "comments": 0,
+            "commenters": 0,
+            "reports": 0
+
+        },
+        "url": url
+    };
 
     const verifyUploadKey = database.ref(`uploads/meta/${uploadKey}`).once('value');
     verifyUploadKey.then(snapshot => {
@@ -264,24 +321,7 @@ app.post('/upload', (req, res) => {
             });
         }
 
-        var updateObject = {};
-
-        var metaObject = {
-            "author": author,
-            "color": color,
-            "contentType": type,
-            "length": length,
-            "stats": {
-                "timestamp": admin.database.ServerValue.TIMESTAMP,
-                "views": 0,
-                "likes": 0,
-                "comments": 0,
-                "commenters": 0,
-                "reports": 0
-
-            },
-            "url": url
-        };
+        metaObject["author"] = author;
 
         if (placeID) {
             metaObject["placeID"] = placeID;
@@ -324,95 +364,231 @@ app.post('/upload', (req, res) => {
             updateObject[`users/uploads/public/${uid}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
         }
 
-        updateObject[`/uploads/meta/${uploadKey}`] = metaObject;
+
         updateObject[`/uploads/subscribers/${uploadKey}/${uid}`] = true;
 
-        if (coordinates && coordinates.lat && coordinates.lon) {
-            const locationObject = {
-                "u": author,
-                "lat": coordinates.lat,
-                "lon": coordinates.lon,
-                "t": admin.database.ServerValue.TIMESTAMP
-            }
+        if (!coordinates || !coordinates.lat || !coordinates.lon) {
+            return res.status(400).send({
+                "success": false
+            });
+        }
+        
+        const locationObject = {
+            "u": author,
+            "lat": lat,
+            "lon": lon,
+            "t": admin.database.ServerValue.TIMESTAMP
+        }
+        updateObject[`/uploads/location/${uploadKey}`] = locationObject;
 
-            updateObject[`/uploads/location/${uploadKey}`] = locationObject;
+        const reverseGeocode = geocoder.reverse({
+            lat: lat,
+            lon: lon
+        });
+
+        return reverseGeocode;
+
+    }).then(function (geoResponse) {
+
+        const body = geoResponse[0];
+        const fullAddress = body["formattedAddress"];
+        const countryName = body["country"];
+        const countryCode = body["countryCode"];
+        const city = body["city"];
+        const adminLevels = body["administrativeLevels"];
+        const region = adminLevels["level1short"];
+
+        const input = encodeURIComponent(`${city} ${countryName}`);
+        const autocompleteRequest = `https://maps.googleapis.com/maps/api/place/autocomplete/json?input=${input}&types=(cities)&location=${lat},${lon}&radius=25000&key=${GOOGLE_PLACES_API_KEY}`;
+
+        return rp(autocompleteRequest);
+
+    }).then(function (body) {
+        console.log("We here");
+        var jsonResults = JSON.parse(body);
+        var status = jsonResults["status"];
+        var predictions = jsonResults["predictions"];
+        var first = predictions[0];
+        var regionPlaceID = null;
+        if (first) {
+            regionPlaceID = first["place_id"];
         }
 
-        if (placeID) {
-            const url = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
-            request(url, function (error, response, body) {
+        console.log("RegionPlaceID: ", regionPlaceID);
 
-                if (error) {
-                    return res.status(400).send({
-                        "success": false
-                    });
-                } else {
+        if (regionPlaceID) {
+            metaObject["regionPlaceID"] = regionPlaceID;
 
-                    var jsonResults = JSON.parse(body)["result"];
-                    console.log("PLACE RESULTS: ", JSON.stringify(jsonResults, null, 2));
-                    const name = jsonResults["name"];
-                    const addr = jsonResults["formatted_address"];
-                    const lat = jsonResults["geometry"]["location"]["lat"];
-                    const lon = jsonResults["geometry"]["location"]["lng"];
-
-                    const placeInfo = {
-                        "name": name,
-                        "address": addr,
-                        "lat": lat,
-                        "lon": lon
-                    };
-
-                    const placeCoords = {
-                        "lat": lat,
-                        "lon": lon
-                    };
-
-                    const placeStory = {
-                        "t": admin.database.ServerValue.TIMESTAMP,
-                        "u": author
-                    }
-
-                    updateObject[`places/info/${placeID}`] = placeInfo;
-                    updateObject[`places/coords/${placeID}`] = placeCoords;
-                    updateObject[`places/posts/${placeID}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
-                    updateObject[`places/story/${placeID}/${uploadKey}`] = placeStory;
-
-                }
-
-                const update = database.ref().update(updateObject);
-
-                update.then(error => {
-                    if (error) {
-                        return res.status(400).send({
-                            "success": false
-                        });
-                    } else {
-                        res.send({
-                            "success": true,
-                        });
-                    }
-                });
-            });
+            const cityPlaceURL = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${regionPlaceID}&key=${GOOGLE_PLACES_API_KEY}`;
+            return rp(cityPlaceURL);
 
         } else {
-            const update = database.ref().update(updateObject);
-
-            update.then(error => {
-                if (error) {
-                    return res.status(400).send({
-                        "success": false
-                    });
-                } else {
-                    res.send({
-                        "success": true,
-                    });
-                }
-            });
+            console.log("NO PLACEID");
+            return Promise.resolve(null);
         }
 
+    }).then(cityBody => {
+        if (cityBody) {
+            const jsonResults = JSON.parse(cityBody)["result"];
+            const cityPlaceID = jsonResults["place_id"];
+            const name = jsonResults["name"];
+            const addr = jsonResults["formatted_address"];
+            const cityLat = jsonResults["geometry"]["location"]["lat"];
+            const cityLon = jsonResults["geometry"]["location"]["lng"];
+            
+            const cityInfo = {
+                "name": name,
+                "address": addr,
+                "lat": cityLat,
+                "lon": cityLon
+            };
+
+            const cityCoords = {
+                "lat": cityLat,
+                "lon": cityLon
+            };
+
+            updateObject[`cities/info/${cityPlaceID}`] = cityInfo;
+            updateObject[`cities/coords/${cityPlaceID}`] = cityCoords;
+            updateObject[`cities/posts/${cityPlaceID}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+
+            console.log("META OBJECT: ", metaObject);
+            console.log("UPDATE OBJECT: ", updateObject);
+
+        }
+        
+        if (placeID) {
+            const placeURL = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
+            
+            return rp(placeURL);
+        } else {
+            return Promise.resolve(null);
+        }
+
+    }).then( placeBody => {
+    
+        if (placeBody) {
+            var jsonResults = JSON.parse(placeBody)["result"];
+            const name = jsonResults["name"];
+            const addr = jsonResults["formatted_address"];
+            const lat = jsonResults["geometry"]["location"]["lat"];
+            const lon = jsonResults["geometry"]["location"]["lng"];
+
+            const placeInfo = {
+                "name": name,
+                "address": addr,
+                "lat": lat,
+                "lon": lon
+            };
+
+            const placeCoords = {
+                "lat": lat,
+                "lon": lon
+            };
+
+            const placeStory = {
+                "t": admin.database.ServerValue.TIMESTAMP,
+                "u": author
+            };
+
+            updateObject[`places/info/${placeID}`] = placeInfo;
+            updateObject[`places/coords/${placeID}`] = placeCoords;
+            updateObject[`places/posts/${placeID}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+            updateObject[`places/story/${placeID}/${uploadKey}`] = placeStory;
+        } else {
+            console.log("No place specified");
+        }
+        
+        updateObject[`uploads/meta/${uploadKey}`] = metaObject;
+        const update = database.ref().update(updateObject);
+        return update;
+        
+    }).then( results => {
+      return res.send({
+            "success": true
+        });  
+    }).catch(error => {
+        console.log(error);
+        return res.status(400).send({
+            "success": false
+        });
     });
 
 });
+
+
+
+//if (placeID) {
+//                    const url = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
+//                    request(url, function (error, response, body) {
+//
+//                        if (error) {
+//                            return res.status(400).send({
+//                                "success": false
+//                            });
+//                        } else {
+//
+//                            var jsonResults = JSON.parse(body)["result"];
+//                            console.log("PLACE RESULTS: ", JSON.stringify(jsonResults, null, 2));
+//                            const name = jsonResults["name"];
+//                            const addr = jsonResults["formatted_address"];
+//                            const lat = jsonResults["geometry"]["location"]["lat"];
+//                            const lon = jsonResults["geometry"]["location"]["lng"];
+//
+//                            const placeInfo = {
+//                                "name": name,
+//                                "address": addr,
+//                                "lat": lat,
+//                                "lon": lon
+//                            };
+//
+//                            const placeCoords = {
+//                                "lat": lat,
+//                                "lon": lon
+//                            };
+//
+//                            const placeStory = {
+//                                "t": admin.database.ServerValue.TIMESTAMP,
+//                                "u": author
+//                            };
+//
+//                            updateObject[`places/info/${placeID}`] = placeInfo;
+//                            updateObject[`places/coords/${placeID}`] = placeCoords;
+//                            updateObject[`places/posts/${placeID}/${uploadKey}`] = admin.database.ServerValue.TIMESTAMP;
+//                            updateObject[`places/story/${placeID}/${uploadKey}`] = placeStory;
+//
+//                        }
+//
+//                        const update = database.ref().update(updateObject);
+//
+//                        update.then(error => {
+//                            if (error) {
+//                                return res.status(400).send({
+//                                    "success": false
+//                                });
+//                            } else {
+//                                res.send({
+//                                    "success": true,
+//                                });
+//                            }
+//                        });
+//                    });
+//
+//                } else {
+//                    const update = database.ref().update(updateObject);
+//
+//                    update.then(error => {
+//                        if (error) {
+//                            return res.status(400).send({
+//                                "success": false
+//                            });
+//                        } else {
+//                            return res.send({
+//                                "success": true,
+//                            });
+//                        }
+//                    });
+//                }
 
 
 exports.handleNewUser = functions.auth.user().onCreate(event => {
@@ -472,14 +648,14 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
     const aid = event.data.val().aid;
     const text = event.data.val().text;
     const timestamp = event.data.val().timestamp;
-
+    console.log("WHAT?");
     console.log("Anon comment recieved.");
     console.log("Text: ", text);
 
     const getExisitingAnonName = database.ref(`/uploads/anonNames/${postKey}/${uid}`).once('value');
 
     return getExisitingAnonName.then(existingAnonName => {
-        
+
 
         if (existingAnonName.exists()) {
             const adjective = existingAnonName.val().adjective;
@@ -500,11 +676,11 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
             const commentKey = database.ref(`/uploads/comments/${postKey}/`).push().key;
             const setComment = database.ref(`/uploads/comments/${postKey}/${commentKey}`).set(commentObject);
             return setComment.then(results => {})
-            .catch(error => {
-                console.log("AnonComment: ", error);
-            });
+                .catch(error => {
+                    console.log("AnonComment: ", error);
+                });
         }
-        
+
         console.log("Anon name does not exist");
 
         const getPostAnonNames = database.ref(`/uploads/anonNames/${postKey}`).once('value');
@@ -570,49 +746,114 @@ exports.handleAnonymousComment = functions.database.ref('/api/requests/anon_comm
     return
 });
 
-//exports.processUploadLocation = functions.database.ref('/uploads/location/{postKey}').onWrite(event => {
-//    const postKey = event.params.postKey;
-//
-//    // Only edit data when it is first created.
-//    if (event.data.previous.exists()) {
-//        return;
-//    }
-//    // Exit when the data is deleted.
-//    if (!event.data.exists()) {
-//        return;
-//    }
-//
-//    const val = event.data.val();
-//    const uid = val.u;
-//    const lat = val.lat;
-//    const lon = val.lon;
-//
-//    const reverseGeocode = geocoder.reverse({
-//        lat: lat,
-//        lon: lon
-//    });
-//
-//    return reverseGeocode.then(function (res) {
-//            const body = res[0];
-//            const country = body["country"];
-//            const countryCode = body["countryCode"];
-//
-//            const countryObject = countryCodes[countryCode];
-//            if (countryObject !== null && countryObject !== undefined) {
-//                const badgeID = countryObject["badgeID"];
-//                const addBadge = database.ref(`users/badges/${uid}/${badgeID}`).set(true);
-//                return addBadge.then(results => {
-//
-//                });
-//            }
-//            return
-//        })
-//        .catch(function (err) {
-//            console.log(err);
-//        });
-//});
+exports.requestCity = functions.database.ref('admin/city/{country}/{city}').onWrite(event => {
+    const country = event.params.country;
+    const city = event.params.city;
+
+    // Only edit data when it is first created.
+    if (event.data.previous.exists()) {
+        return;
+    }
+    // Exit when the data is deleted.
+    if (!event.data.exists()) {
+        return;
+    }
+
+    const getCityCoords = geocoder.geocode(`${city}, ${country}`);
+
+    return getCityCoords.then(response => {
+        const body = response[0];
 
 
+        console.log("FULL CITY RESPONSE: ", response);
+        return
+    });
+
+});
+
+exports.addPostToCity = functions.database.ref('/api/requests/addPostToCity/{postKey}').onWrite(event => {
+    const postKey = event.params.postKey;
+
+    // Only edit data when it is first created.
+    if (event.data.previous.exists()) {
+        return;
+    }
+    // Exit when the data is deleted.
+    if (!event.data.exists()) {
+        return;
+    }
+
+    const val = event.data.val();
+    const fullAddress = val.fullAddress;
+    const author = val.author;
+    const city = val.city;
+    const country = val.country;
+    const region = val.region;
+    const code = `${country}:${region}:${city}`;
+    const cityRef = database.ref('cities/info').orderByChild('code').equalTo(code).limitToFirst(1).once('value');
+
+    return cityRef.then(snapshot => {
+
+        if (snapshot.exists()) {
+            const cityKey = Object.keys(snapshot.val())[0];
+
+            const addCityPost = database.ref(`cities/posts/${cityKey}/${postKey}`).set({
+                "t": admin.database.ServerValue.TIMESTAMP,
+                "a": author
+            });
+
+            return addCityPost.then(results => {
+
+            }).catch(error => {
+                console.log("Error: ", error);
+            })
+
+        } else {
+            console.log("Adding new city...");
+
+            const getCityCoords = geocoder.geocode(fullAddress);
+
+            return getCityCoords.then(response => {
+                const body = response[0];
+                const lat = body["latitude"];
+                const lon = body["longitude"];
+
+
+                const newCityKey = database.ref('cities/info').push().key;
+
+                const addNewCity = database.ref(`cities/info/${newCityKey}`).set({
+                    "code": code,
+                    "city": city,
+                    "country": country,
+                    "region": region,
+                    "lat": lat,
+                    "lon": lon
+                });
+
+                const addCityCoords = database.ref(`cities/coords/${newCityKey}`).set({
+                    "lat": lat,
+                    "lon": lon
+                });
+
+                const addCityPost = database.ref(`cities/posts/${newCityKey}/${postKey}`).set({
+                    "t": admin.database.ServerValue.TIMESTAMP,
+                    "a": author
+                });
+
+                return Promise.all([addNewCity, addCityCoords, addCityPost]).then(results => {
+
+                }).catch(error => {
+                    console.log("Error: ", error);
+                })
+            });
+
+        }
+
+    }).catch(error => {
+        console.log("Error: ", error);
+    })
+
+});
 
 exports.removePostData = functions.database.ref('/admin/remove').onWrite(event => {
     const value = event.data.val();
@@ -701,12 +942,12 @@ exports.runCleanUp = functions.database.ref('/admin/cleanup').onWrite(event => {
             });
 
         });
-        
+
         placeStoriesSnapshot.forEach(function (placeStorySnapshot) {
             const placeID = placeStorySnapshot.key;
             const story = placeStorySnapshot.val();
-            
-            placeStorySnapshot.forEach(function(story) {
+
+            placeStorySnapshot.forEach(function (story) {
                 const timestamp = story.val().t;
                 const age = utilities.getMinutesSinceNow(timestamp);
 
@@ -911,7 +1152,7 @@ exports.processUploads =
         const prevData = event.data.previous._data;
 
         if (!event.data.exists()) {
-            return deletePost(uploadKey, prevData.author, prevData.placeID);
+            return deletePost(uploadKey, prevData.author, prevData.placeID, prevData.regionPlaceID);
         }
 
         if (prevData !== null) {
@@ -947,7 +1188,7 @@ exports.processUploads =
         //        });
     });
 
-function deletePost(key, author, placeId) {
+function deletePost(key, author, placeId, regionPlaceId) {
     console.log("Delete post: ", key);
 
     var promises = [
@@ -964,9 +1205,9 @@ function deletePost(key, author, placeId) {
         database.ref(`uploads/stats/${key}`).remove(),
         database.ref(`uploads/subscribers/${key}`).remove(),
         database.ref(`uploads/anonNames/${key}`).remove(),
-        database.ref(`reports/posts/${key}`).remove(),
-        
+        database.ref(`reports/posts/${key}`).remove()
     ];
+
 
     if (placeId !== null && placeId !== undefined) {
         const removePlacePost = database.ref(`places/posts/${placeId}/${key}`).remove();
@@ -975,6 +1216,12 @@ function deletePost(key, author, placeId) {
         promises.push(removePlacePost);
         promises.push(removePlaceStory);
     }
+    
+    if (regionPlaceId) {
+        const removeRegionPost = database.ref(`cities/posts/${regionPlaceId}/${key}`).remove();
+        promises.push(removeRegionPost);
+    }
+
 
     return Promise.all(promises).then(results => {
         const notifications = results[0];
@@ -984,6 +1231,8 @@ function deletePost(key, author, placeId) {
             const promise = database.ref(`notifications/${notificationKey}`).remove();
             removeNotificationPromises.push(promise);
         });
+
+
 
         return Promise.all(removeNotificationPromises).then(snapshot => {
 
@@ -1414,11 +1663,15 @@ exports.locationUpdate = functions.database.ref('/users/location/coordinates/{ui
     const rad = newData.rad;
 
     const userCoordsRef = database.ref('uploads/location/').once('value');
+    const cityCoordsRef = database.ref('cities/coords/').once('value');
     const placeCoordsRef = database.ref('places/coords/').once('value');
 
-    return Promise.all([userCoordsRef, placeCoordsRef]).then(results => {
+
+
+    return Promise.all([userCoordsRef, cityCoordsRef, placeCoordsRef]).then(results => {
         const userCoordsSnap = results[0];
-        const placeCoordsSnap = results[1];
+        const cityCoordsSnap = results[1];
+        const placeCoordsSnap = results[2];
 
         var nearbyPosts = {};
 
@@ -1439,6 +1692,23 @@ exports.locationUpdate = functions.database.ref('/users/location/coordinates/{ui
 
         const setNearbyPosts = database.ref(`users/location/nearby/${userId}/posts`).set(nearbyPosts);
 
+        var nearbyCities = {};
+
+        console.log("RADIUS: ", rad);
+        cityCoordsSnap.forEach(function (city) {
+
+            const distance = utilities.haversineDistance(lat, lon, city.val().lat, city.val().lon);
+            console.log(`${city.key} -> ${distance}`);
+            if (distance <= rad + 25.0) {
+                nearbyCities[city.key] = distance;
+            }
+        });
+
+
+        console.log("Nearby cities: ", nearbyCities);
+
+        const setNearbyCities = database.ref(`users/location/nearby/${userId}/cities`).set(nearbyCities);
+
         var nearbyPlaces = {};
 
         placeCoordsSnap.forEach(function (place) {
@@ -1453,7 +1723,7 @@ exports.locationUpdate = functions.database.ref('/users/location/coordinates/{ui
 
         const setNearbyPlaces = database.ref(`users/location/nearby/${userId}/places`).set(nearbyPlaces);
 
-        return Promise.all([setNearbyPosts, setNearbyPlaces]).then(result => {
+        return Promise.all([setNearbyPosts, setNearbyCities, setNearbyPlaces]).then(result => {
 
 
 
@@ -1661,7 +1931,7 @@ exports.updatePostMeta = functions.database.ref('/uploads/meta/{postKey}/stats')
 
     var promises = [];
 
-    if (pop > 0) {
+    if (pop >= 1) {
         const setPopularity = database.ref(`/uploads/popular/${postKey}`).set(pop);
         promises.push(setPopularity);
     } else {
