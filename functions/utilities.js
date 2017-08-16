@@ -46,3 +46,9 @@ exports.calculateUserStoryPopularityScore = function(numViews, numParticipants) 
 exports.calculatePlaceStoryPopularityScore = function(numPosts, numViews, numParticipants) {
     return numPosts * 2.0 + numViews * 2.0 + numParticipants * 3.0
 }
+
+exports.getConversationPairKey = function(uidA, uidB) {
+    const sorted = [uidA, uidB].sort();
+    return `${sorted[0]}:${sorted[1]}`;
+    
+}

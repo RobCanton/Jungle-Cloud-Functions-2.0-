@@ -372,7 +372,7 @@ app.post('/upload', (req, res) => {
                 "success": false
             });
         }
-        
+
         const locationObject = {
             "u": author,
             "lat": lat,
@@ -435,7 +435,7 @@ app.post('/upload', (req, res) => {
             const addr = jsonResults["formatted_address"];
             const cityLat = jsonResults["geometry"]["location"]["lat"];
             const cityLon = jsonResults["geometry"]["location"]["lng"];
-            
+
             const cityInfo = {
                 "name": name,
                 "address": addr,
@@ -456,17 +456,17 @@ app.post('/upload', (req, res) => {
             console.log("UPDATE OBJECT: ", updateObject);
 
         }
-        
+
         if (placeID) {
             const placeURL = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
-            
+
             return rp(placeURL);
         } else {
             return Promise.resolve(null);
         }
 
-    }).then( placeBody => {
-    
+    }).then(placeBody => {
+
         if (placeBody) {
             var jsonResults = JSON.parse(placeBody)["result"];
             const name = jsonResults["name"];
@@ -498,15 +498,15 @@ app.post('/upload', (req, res) => {
         } else {
             console.log("No place specified");
         }
-        
+
         updateObject[`uploads/meta/${uploadKey}`] = metaObject;
         const update = database.ref().update(updateObject);
         return update;
-        
-    }).then( results => {
-      return res.send({
+
+    }).then(results => {
+        return res.send({
             "success": true
-        });  
+        });
     }).catch(error => {
         console.log(error);
         return res.status(400).send({
@@ -516,7 +516,250 @@ app.post('/upload', (req, res) => {
 
 });
 
+app.post('/message/', (req, res) => {
+    const senderUserID = req.user.uid;
 
+    const recipientUserID = req.body.recipient;
+
+    const text = req.body.text;
+
+    const sorted = [senderUserID, recipientUserID].sort();
+    const alphaParticipant = sorted[0];
+    const betaParticipant = sorted[1];
+    const conversationKey = `${alphaParticipant}:${betaParticipant}`;
+
+    const isAlpha = alphaParticipant === senderUserID;
+
+    const checkSenderBlocked = database.ref(`social/blocked/${recipientUserID}/${senderUserID}`).once('value');
+    const checkRecipientBlocked = database.ref(`social/blocked/${senderUserID}/${recipientUserID}`).once('value');
+
+    return Promise.all([checkSenderBlocked, checkRecipientBlocked]).then(results => {
+
+        if (results[0].exists()) {
+            return res.status(400).send({
+                "success": false,
+                "msg": "Unable to send message."
+            });
+        }
+
+        if (results[1].exists()) {
+            return res.status(400).send({
+                "success": false,
+                "msg": "Unblock this user to send them a message."
+            });
+        }
+
+        var updateObject = {};
+
+        updateObject[`directMessages/${conversationKey}/participants/${senderUserID}`] = true;
+        updateObject[`directMessages/${conversationKey}/participants/${recipientUserID}`] = true;
+
+        let messageKey = database.ref(`directMessages/${conversationKey}/messages`).push().key;
+        updateObject[`directMessages/${conversationKey}/messages/${messageKey}`] = {
+            "sender": senderUserID,
+            "recipient": recipientUserID,
+            "text": text,
+            "timestamp": admin.database.ServerValue.TIMESTAMP
+        };
+
+        updateObject[`users/directMessages/${senderUserID}/${recipientUserID}/seen`] = true;
+        updateObject[`users/directMessages/${senderUserID}/${recipientUserID}/text`] = text;
+        updateObject[`users/directMessages/${senderUserID}/${recipientUserID}/sender`] = senderUserID;
+        updateObject[`users/directMessages/${senderUserID}/${recipientUserID}/timestamp`] = admin.database.ServerValue.TIMESTAMP;
+
+        updateObject[`users/directMessages/${recipientUserID}/${senderUserID}/seen`] = false;
+        updateObject[`users/directMessages/${recipientUserID}/${senderUserID}/text`] = text;
+        updateObject[`users/directMessages/${recipientUserID}/${senderUserID}/sender`] = senderUserID;
+        updateObject[`users/directMessages/${recipientUserID}/${senderUserID}/timestamp`] = admin.database.ServerValue.TIMESTAMP;
+
+        const update = database.ref().update(updateObject);
+        return update.then(results => {
+
+            res.send({
+                "success": true
+            });
+
+        }).catch(error => {
+
+            res.status(400).send({
+                "success": false
+            });
+        });
+
+    });
+
+});
+
+app.post('/comment/', (req, res) => {
+    const senderUserID = req.user.uid;
+    const postKey = req.body.postKey;
+    const text = req.body.text;
+    const aid = req.body.aid;
+
+    var author = req.body.author;
+    const isAnonPost = req.body.isAnonPost;
+
+    var getAuthorRealUID = Promise.resolve(null);
+
+    if (isAnonPost) {
+        getAuthorRealUID = database.ref(`anon/uid/${author}/`).once('value');
+    }
+
+    return getAuthorRealUID.then(snapshot => {
+
+        if (snapshot) {
+            if (snapshot.exists()) {
+                author = snapshot.val();
+            }
+        }
+
+        const checkSenderBlocked = database.ref(`social/blocked/${author}/${senderUserID}`).once('value');
+        const checkAuthorBlocked = database.ref(`social/blocked/${senderUserID}/${author}`).once('value');
+
+        return Promise.all([checkSenderBlocked, checkAuthorBlocked]);
+
+    }).then(results => {
+        if (results[0].exists()) {
+            return res.status(400).send({
+                "success": false,
+                "msg": "Unable to add comment."
+            });
+        }
+
+        if (results[1].exists()) {
+            return res.status(400).send({
+                "success": false,
+                "msg": "Unblock this user to comment on their posts."
+            });
+        }
+
+        if (!aid) {
+            return Promise.resolve(null);
+        }
+
+        const getAllExisitingAnonNames = database.ref(`/uploads/anonNames/${postKey}`).once('value');
+
+        return getAllExisitingAnonNames;
+
+
+    }).then(existingAnonNamesSnapshot => {
+
+        if (!existingAnonNamesSnapshot) {
+            return Promise.resolve(null);
+        }
+
+        var anonObject = null;
+        var existing = false
+        existingAnonNamesSnapshot.forEach(function (existingAnonSnapshot) {
+            if (existingAnonSnapshot.key === senderUserID) {
+                anonObject = {
+                    "adjective": existingAnonSnapshot.val().adjective,
+                    "animal": existingAnonSnapshot.val().animal,
+                    "color": existingAnonSnapshot.val().color
+                };
+                existing = true;
+            }
+        });
+
+        if (anonObject == null) {
+            var adjective = "";
+            var animal = "";
+            var color = "";
+            var validNameFound = false;
+            while (!validNameFound) {
+
+                var nameAvailable = true;
+
+                adjective = randomAdjective();
+                animal = randomAnimal();
+                color = randomColor();
+
+                existingAnonNamesSnapshot.forEach(function (existingAnonName) {
+                    const existingAdjective = existingAnonName.val().adjective;
+                    const existingAnimal = existingAnonName.val().animal;
+                    if (existingAdjective + existingAnimal == adjective + animal) {
+                        nameAvailable = false;
+                        console.log("Name already Exists!");
+                    }
+                });
+
+                if (nameAvailable) {
+                    validNameFound = true;
+                }
+            }
+
+            anonObject = {
+                "adjective": adjective,
+                "animal": animal,
+                "color": color
+            };
+        }
+
+        const setAnonName = database.ref(`/uploads/anonNames/${postKey}/${senderUserID}`).set({
+            "aid": aid,
+            "adjective": anonObject.adjective,
+            "animal": anonObject.animal,
+            "color": anonObject.color
+        });
+
+
+        return Promise.resolve({
+            "anon": anonObject,
+            "existing": existing
+        });
+
+    }).then(anonResults => {
+
+        var promises = [];
+
+        var commentObject = {
+            "text": text,
+            "timestamp": admin.database.ServerValue.TIMESTAMP,
+        };
+
+        if (aid) {
+            if (anonResults && anonResults.existing && anonResults.anon) {
+                const existing = anonResults.existing;
+                const anonObject = anonResults.anon;
+                if (!existing) {
+                    const setAnonName = database.ref(`/uploads/anonNames/${postKey}/${senderUserID}`).set({
+                        "aid": aid,
+                        "adjective": anonObject.adjective,
+                        "animal": anonObject.animal,
+                        "color": anonObject.color
+                    });
+                    promises.push(setAnonName);
+                }
+                commentObject["author"] = aid;
+                commentObject["anon"] = anonObject;
+
+            } else {
+                return Promise.reject(null);
+            }
+        } else {
+            commentObject["author"] = senderUserID;
+        }
+
+        const commentKey = database.ref(`/uploads/comments/${postKey}/`).push().key;
+        const setComment = database.ref(`/uploads/comments/${postKey}/${commentKey}`).set(commentObject);
+
+        promises.push(setComment);
+
+        return Promise.all(promises);
+
+    }).then(results => {
+        return res.send({
+            "success": true
+        });
+    }).catch(error => {
+        console.log("ERROR: ", error);
+        return res.status(400).send({
+            "success": false
+        });
+    });
+
+
+});
 
 //if (placeID) {
 //                    const url = `https://maps.googleapis.com/maps/api/place/details/json?placeid=${placeID}&key=${GOOGLE_PLACES_API_KEY}`;
@@ -920,7 +1163,7 @@ exports.runCleanUp = functions.database.ref('/admin/cleanup').onWrite(event => {
             const timestamp = post.val().t;
             const age = utilities.getMinutesSinceNow(timestamp);
 
-            if (age >= 1440 * 3.0) {
+            if (age >= 1440 * 7.0) {
                 const promise = database.ref(`uploads/location/${post.key}`).remove();
                 promises.push(promise);
             }
@@ -1056,8 +1299,8 @@ exports.processUserBlocked = functions.database.ref('/social/blocked/{uid}/{bloc
     const value = event.data.val();
 
     if (value == null) {
-        const conv_ref_1 = database.ref(`users/conversations/${blocked_uid}/${uid}/blocked`).remove();
-        const conv_ref_2 = database.ref(`users/conversations/${uid}/${blocked_uid}/blocked`).remove();
+        const conv_ref_1 = database.ref(`users/directMessages/${blocked_uid}/${uid}/blocked`).remove();
+        const conv_ref_2 = database.ref(`users/directMessages/${uid}/${blocked_uid}/blocked`).remove();
         return Promise.all([conv_ref_1, conv_ref_2]).then(results => {
 
         });
@@ -1068,8 +1311,8 @@ exports.processUserBlocked = functions.database.ref('/social/blocked/{uid}/{bloc
     const follow_ref_2 = database.ref(`social/following/${uid}/${blocked_uid}`).remove();
     const follow_ref_3 = database.ref(`social/followers/${blocked_uid}/${uid}`).remove();
     const follow_ref_4 = database.ref(`social/following/${blocked_uid}/${uid}`).remove();
-    const conv_ref_1 = database.ref(`users/conversations/${blocked_uid}/${uid}/blocked`).set(true);
-    const conv_ref_2 = database.ref(`users/conversations/${uid}/${blocked_uid}/blocked`).set(true);
+    const conv_ref_1 = database.ref(`users/directMessages/${blocked_uid}/${uid}/blocked`).set(true);
+    const conv_ref_2 = database.ref(`users/directMessages/${uid}/${blocked_uid}/blocked`).set(true);
 
     return Promise.all([follow_ref_1, follow_ref_2, follow_ref_3, follow_ref_4, conv_ref_1, conv_ref_2]).then(results => {
         console.log("Follow social removed");
@@ -1216,7 +1459,7 @@ function deletePost(key, author, placeId, regionPlaceId) {
         promises.push(removePlacePost);
         promises.push(removePlaceStory);
     }
-    
+
     if (regionPlaceId) {
         const removeRegionPost = database.ref(`cities/posts/${regionPlaceId}/${key}`).remove();
         promises.push(removeRegionPost);
@@ -1377,7 +1620,7 @@ exports.sendCommentNotification = functions.database.ref('/uploads/comments/{pos
     const value = event.data.val();
     const newData = event.data._newData;
 
-    if (value == null || newData == null) {
+    if (!event.data.exists()) {
         const postCommentsPromise = database.ref(`/uploads/comments/${postKey}`).once('value');
 
         return postCommentsPromise.then(results => {
@@ -1396,6 +1639,11 @@ exports.sendCommentNotification = functions.database.ref('/uploads/comments/{pos
         }).catch(function (error) {
             console.log("Promise rejected: " + error);
         });
+    }
+
+    // Only edit data when it is first created.
+    if (event.data.previous.exists()) {
+        return;
     }
 
     const sender = newData.author;
@@ -1566,6 +1814,76 @@ exports.sendCommentNotification = functions.database.ref('/uploads/comments/{pos
 
 });
 
+exports.updateCommentLikes = functions.database.ref('/uploads/commentLikes/{postKey}/{commentKey}').onWrite(event => {
+    const postKey = event.params.postKey;
+    const commentKey = event.params.commentKey;
+
+    const numLikes = event.data.numChildren();
+    const setNumLikes = database.ref(`/uploads/comments/${postKey}/${commentKey}/likes`).set(numLikes);
+    return setNumLikes;
+
+    //    const commentsLikesPromise = database.ref(`/uploads/commentLikes/${postKey}/${commentKey}`).once('value');
+    //
+    //    var recipient = null;
+    //    var numLikes = null;
+    //    return commentsLikesPromise.then(snapshot => {
+    //        numLikes = snapshot.numChildren();
+    //        const setNumLikes = database.ref(`/uploads/comments/${postKey}/${commentKey}/likes`).set(numLikes);
+    //        return setNumLikes;
+    //    }).then(result => {
+    //        console.log("Get post meta");
+    //        const postDataPromise = database.ref(`/uploads/meta/${postKey}`).once('value');
+    //        return postDataPromise;
+    //    }).then(postMetaSnapshot => {
+    //        recipient = postMetaSnapshot.val().author;
+    //
+    //        if (postMetaSnapshot.val().anon) {
+    //            const getUid = database.ref(`/anon/uid/${recipient}`).once('value');
+    //            return getUid;
+    //        } else {
+    //            return Promise.resolve(null);
+    //        }
+    //
+    //    }).then(uidSnapshot => {
+    //
+    //        if (uidSnapshot) {
+    //            recipient = uidSnapshot.val();
+    //        }
+    //
+    //        const nKey = `comment_like:${postKey}:${commentKey}`;
+    //        console.log("Add notification: ", nKey);
+    //        console.log(numLikes);
+    //
+    //        if (numLikes > 0) {
+    //            var notificationObject = {};
+    //
+    //            const nObject = {
+    //                "type": 'COMMENT_LIKE',
+    //                "postKey": postKey,
+    //                "sender": uid,
+    //                "recipient": recipient,
+    //                "count": numLikes,
+    //                "timestamp": admin.database.ServerValue.TIMESTAMP
+    //            }
+    //
+    //            console.log("Add notification: ", nObject);
+    //
+    //            const notificationPromise = database.ref(`notifications/${nKey}`).set(nObject);
+    //            return notificationPromise;
+    //
+    //        } else {
+    //            const removeNotification = database.ref(`notifications/${nKey}`).remove();
+    //            return removeNotification;
+    //        }
+    //
+    //    }).catch(function (error) {
+    //        console.log("Promise rejected: " + error);
+    //        return;
+    //    });
+
+
+});
+
 exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}').onWrite(event => {
     const userId = event.params.uid;
     const postKey = event.params.postKey;
@@ -1575,50 +1893,64 @@ exports.updateLikesMeta = functions.database.ref('/uploads/likes/{postKey}/{uid}
     const postDataPromise = database.ref(`/uploads/meta/${postKey}`).once('value');
     const postLikesPromise = database.ref(`/uploads/likes/${postKey}`).once('value');
 
+    var numLikes = null;
+    var recipient = null;
+
     return Promise.all([postDataPromise, postLikesPromise]).then(results => {
         const postMeta = results[0].val();
         const postLikes = results[1];
-        const author = postMeta.author;
-        const live = postMeta.live;
-        const placeId = postMeta.placeID;
+        recipient = postMeta.author;
+        numLikes = postLikes.numChildren();
 
-        const numLikes = postLikes.numChildren();
-        var promises = [];
-
-        if (numLikes > 0) {
-            var notificationObject = {};
-            const nKey = `like:${postKey}`;
-            const nObject = {
-                "type": 'LIKE',
-                "postKey": postKey,
-                "sender": userId,
-                "recipient": author,
-                "count": numLikes,
-                "timestamp": admin.database.ServerValue.TIMESTAMP
-            }
-
-            const notificationPromise = database.ref(`notifications/${nKey}`).set(nObject);
-            promises.push(notificationPromise);
-
+        if (postMeta.anon) {
+            const getUid = database.ref(`/anon/uid/${postMeta.author}`).once('value');
+            return getUid;
         } else {
-
-            const nKey = `like:${postKey}`;
-            const removeNotification = database.ref(`notifications/${nKey}`).remove();
-            promises.push(removeNotification);
+            return Promise.resolve(null);
         }
 
-        const promise = database.ref(`/uploads/meta/${postKey}/stats/likes`).set(numLikes);
-        promises.push(promise);
+    }).then(uidSnapshot => {
 
+        if (uidSnapshot) {
+            recipient = uidSnapshot.val();
+        }
 
-        return Promise.all(promises).then(result => {
+        var promises = [
+            database.ref(`/uploads/meta/${postKey}/stats/likes`).set(numLikes)
+        ];
 
-        }).catch(function (error) {
-            console.log("Promise rejected: " + error);
-        });
-    }).catch(function (error) {
-        console.log("Promise rejected: " + error);
+        //        if (numLikes > 0) {
+        //            var notificationObject = {};
+        //            const nKey = `like:${postKey}`;
+        //            const nObject = {
+        //                "type": 'LIKE',
+        //                "postKey": postKey,
+        //                "sender": userId,
+        //                "recipient": recipient,
+        //                "count": numLikes,
+        //                "timestamp": admin.database.ServerValue.TIMESTAMP
+        //            }
+        //
+        //            const notificationPromise = database.ref(`notifications/${nKey}`).set(nObject);
+        //            promises.push(notificationPromise);
+        //
+        //        } else {
+        //
+        //            const nKey = `like:${postKey}`;
+        //            const removeNotification = database.ref(`notifications/${nKey}`).remove();
+        //            promises.push(removeNotification);
+        //        }
+        //
+        //
+        //
+        return Promise.all(promises);
+
+    }).then(result => {
+        return console.log("Like notification sent.");
+    }).catch(error => {
+        return console.log("Error sending like notification: ", error);
     });
+
 });
 
 exports.updateViewsMeta = functions.database.ref('/uploads/views/{postKey}').onWrite(event => {
@@ -1694,18 +2026,13 @@ exports.locationUpdate = functions.database.ref('/users/location/coordinates/{ui
 
         var nearbyCities = {};
 
-        console.log("RADIUS: ", rad);
         cityCoordsSnap.forEach(function (city) {
 
             const distance = utilities.haversineDistance(lat, lon, city.val().lat, city.val().lon);
-            console.log(`${city.key} -> ${distance}`);
             if (distance <= rad + 25.0) {
                 nearbyCities[city.key] = distance;
             }
         });
-
-
-        console.log("Nearby cities: ", nearbyCities);
 
         const setNearbyCities = database.ref(`users/location/nearby/${userId}/cities`).set(nearbyCities);
 
@@ -1724,8 +2051,6 @@ exports.locationUpdate = functions.database.ref('/users/location/coordinates/{ui
         const setNearbyPlaces = database.ref(`users/location/nearby/${userId}/places`).set(nearbyPlaces);
 
         return Promise.all([setNearbyPosts, setNearbyCities, setNearbyPlaces]).then(result => {
-
-
 
         });
 
